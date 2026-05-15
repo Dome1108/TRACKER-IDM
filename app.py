@@ -174,6 +174,11 @@ def clean_percentage(value):
     return max(0, min(100, value))
 
 
+def es_completo(estado):
+    estado = str(estado).lower()
+    return "completo" in estado or "finalizado" in estado
+
+
 def estado_class(estado):
     estado = str(estado).lower()
 
@@ -192,7 +197,10 @@ def estado_class(estado):
     return "tag-neutro"
 
 
-def vencimiento_texto(fecha):
+def vencimiento_texto(fecha, estado):
+    if es_completo(estado):
+        return "Completado", "tag-completo"
+
     if pd.isna(fecha):
         return "Sin fecha", "tag-neutro"
 
@@ -337,6 +345,9 @@ def prepare_data(df):
     data["Nombre tarjeta"] = data["Mini proyecto"]
     data.loc[data["Nombre tarjeta"].str.strip() == "", "Nombre tarjeta"] = data["Proyecto"]
 
+    data["Es completo"] = data["Estado"].apply(es_completo)
+    data["Es pendiente"] = ~data["Es completo"]
+
     data = data.sort_values(
         by=["Sin fecha", "Fecha entrega"],
         ascending=[True, True]
@@ -383,7 +394,7 @@ def render_card(row):
 
     avance = int(row["Avance"])
 
-    venc_text, venc_class = vencimiento_texto(row["Fecha entrega"])
+    venc_text, venc_class = vencimiento_texto(row["Fecha entrega"], row["Estado"])
     estado_css = estado_class(row["Estado"])
 
     venc_text = escape(str(venc_text))
@@ -587,7 +598,7 @@ if df_f.empty:
 tab1, tab2, tab3 = st.tabs(
     [
         "📊 Dashboard interactivo",
-        "🗂️ Tarjetas por fecha de entrega",
+        "🗂️ Pendientes por fecha de entrega",
         "📋 Tabla"
     ]
 )
@@ -600,22 +611,32 @@ tab1, tab2, tab3 = st.tabs(
 with tab1:
     st.markdown('<div class="section-title">Resumen general</div>', unsafe_allow_html=True)
 
+    df_pendientes = df_f[df_f["Es pendiente"]].copy()
+
     total = len(df_f)
+    pendientes = len(df_pendientes)
+
     completos = df_f["Estado"].astype(str).str.lower().str.contains("completo|finalizado", na=False).sum()
     proceso = df_f["Estado"].astype(str).str.lower().str.contains("proceso", na=False).sum()
     planificado = df_f["Estado"].astype(str).str.lower().str.contains("planificado", na=False).sum()
     stop = df_f["Estado"].astype(str).str.lower().str.contains("stop", na=False).sum()
-    vencidos = (df_f["Días restantes"] < 0).sum()
+
+    vencidos = (
+        (df_pendientes["Fecha entrega"].notna())
+        & (df_pendientes["Días restantes"] < 0)
+    ).sum()
+
     avance_promedio = round(df_f["Avance"].mean(), 1)
 
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
 
     k1.metric("Total", int(total))
-    k2.metric("Completos", int(completos))
-    k3.metric("En proceso", int(proceso))
-    k4.metric("Planificados", int(planificado))
-    k5.metric("Stop", int(stop))
-    k6.metric("Vencidos", int(vencidos))
+    k2.metric("Pendientes", int(pendientes))
+    k3.metric("Completos", int(completos))
+    k4.metric("En proceso", int(proceso))
+    k5.metric("Planificados", int(planificado))
+    k6.metric("Stop", int(stop))
+    k7.metric("Vencidos pendientes", int(vencidos))
 
     st.metric("Avance promedio", f"{avance_promedio}%")
 
@@ -674,9 +695,9 @@ with tab1:
             config={"displayModeBar": True}
         )
 
-    st.markdown('<div class="section-title">Línea de vencimientos</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Línea de vencimientos pendientes</div>', unsafe_allow_html=True)
 
-    df_time = df_f.dropna(subset=["Fecha entrega"]).copy()
+    df_time = df_pendientes.dropna(subset=["Fecha entrega"]).copy()
     df_time = df_time.sort_values("Fecha entrega").head(30)
 
     if not df_time.empty:
@@ -695,7 +716,7 @@ with tab1:
                 "Fecha entrega": False,
                 "Nombre tarjeta": False
             },
-            title="Proyectos ordenados por fecha de entrega"
+            title="Proyectos pendientes ordenados por fecha de entrega"
         )
 
         fig_time = plotly_layout(fig_time)
@@ -706,21 +727,21 @@ with tab1:
             config={"displayModeBar": True}
         )
     else:
-        st.info("No hay fechas de entrega para mostrar.")
+        st.info("No hay proyectos pendientes con fecha de entrega para mostrar.")
 
 
 # =====================================================
-# TAB 2 - TARJETAS
+# TAB 2 - TARJETAS SOLO PENDIENTES
 # =====================================================
 
 with tab2:
     st.markdown(
-        '<div class="section-title">Detalle de proyectos ordenados por fecha de entrega</div>',
+        '<div class="section-title">Pendientes ordenados por fecha de entrega</div>',
         unsafe_allow_html=True
     )
 
     st.markdown(
-        '<div class="note">Primero aparecen los proyectos con fecha más cercana. Los proyectos sin fecha quedan al final.</div>',
+        '<div class="note">Aquí solo aparecen proyectos pendientes. Los completos o finalizados no se muestran en esta vista.</div>',
         unsafe_allow_html=True
     )
 
@@ -730,12 +751,17 @@ with tab2:
         horizontal=True
     )
 
-    df_cards = df_f.sort_values(
+    df_cards = df_f[df_f["Es pendiente"]].copy()
+
+    df_cards = df_cards.sort_values(
         by=["Sin fecha", "Fecha entrega"],
         ascending=[True, True]
     )
 
-    if vista == "Lista general":
+    if df_cards.empty:
+        st.success("No hay proyectos pendientes con los filtros seleccionados.")
+
+    elif vista == "Lista general":
         for _, row in df_cards.iterrows():
             render_card(row)
 
@@ -767,7 +793,7 @@ with tab2:
         num_cols = min(len(tipos_ordenados), 4)
 
         if num_cols == 0:
-            st.warning("No hay proyectos para mostrar.")
+            st.warning("No hay proyectos pendientes para mostrar.")
         else:
             cols = st.columns(num_cols)
 
