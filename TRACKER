@@ -17,7 +17,7 @@ st.set_page_config(
 # Si quieres usar un archivo fijo en tu carpeta, pon aquí el nombre.
 # Ejemplo:
 # EXCEL_PATH = "tracker_proyectos.xlsx"
-EXCEL_PATH = None
+EXCEL_PATH = "https://github.com/Dome1108/TRACKER-IDM/blob/main/TRACKER%20IDM.xlsx"
 
 # Nombre de la pestaña del Excel
 EXCEL_SHEET = "BASE"
