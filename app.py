@@ -7,7 +7,7 @@ from datetime import date
 from html import escape
 
 # =====================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN GENERAL
 # =====================================================
 
 st.set_page_config(
@@ -49,38 +49,46 @@ st.markdown(
         margin-bottom: 25px;
     }
 
-    .card {
+    .section-title {
+        font-size: 26px;
+        font-weight: 800;
+        color: white;
+        margin-top: 18px;
+        margin-bottom: 15px;
+    }
+
+    .project-card {
         background: #1f2430;
         border: 1px solid #30384a;
         border-radius: 18px;
-        padding: 18px;
-        margin-bottom: 14px;
+        padding: 22px;
+        margin-bottom: 18px;
         box-shadow: 0 6px 18px rgba(0,0,0,0.25);
     }
 
-    .card-title {
-        font-size: 19px;
+    .project-title {
+        font-size: 22px;
         font-weight: 800;
         color: white;
-        margin-bottom: 10px;
+        margin-bottom: 14px;
         line-height: 1.35;
     }
 
-    .card-text {
-        font-size: 14px;
+    .project-text {
+        font-size: 15px;
         color: #d4d4d8;
-        margin-bottom: 5px;
+        margin-bottom: 6px;
         line-height: 1.4;
     }
 
     .tag {
         display: inline-block;
-        padding: 5px 10px;
+        padding: 6px 11px;
         border-radius: 999px;
         font-size: 12px;
         font-weight: 700;
         margin-right: 6px;
-        margin-top: 10px;
+        margin-top: 12px;
     }
 
     .tag-completo {
@@ -108,11 +116,9 @@ st.markdown(
         color: #d0d0d0;
     }
 
-    .section-title {
-        font-size: 26px;
-        font-weight: 800;
-        color: white;
-        margin-top: 10px;
+    .note {
+        color: #a1a1aa;
+        font-size: 14px;
         margin-bottom: 15px;
     }
     </style>
@@ -122,7 +128,7 @@ st.markdown(
 
 
 # =====================================================
-# FUNCIONES
+# FUNCIONES AUXILIARES
 # =====================================================
 
 def normalize_col(col):
@@ -140,12 +146,12 @@ def normalize_col(col):
 
 
 def find_column(df, names):
-    cols = {normalize_col(c): c for c in df.columns}
+    normalized_cols = {normalize_col(c): c for c in df.columns}
 
     for name in names:
         key = normalize_col(name)
-        if key in cols:
-            return cols[key]
+        if key in normalized_cols:
+            return normalized_cols[key]
 
     return None
 
@@ -171,12 +177,15 @@ def clean_percentage(value):
 def estado_class(estado):
     estado = str(estado).lower()
 
-    if "completo" in estado:
+    if "completo" in estado or "finalizado" in estado:
         return "tag-completo"
+
     if "proceso" in estado:
         return "tag-proceso"
+
     if "planificado" in estado:
         return "tag-planificado"
+
     if "stop" in estado or "vencido" in estado or "atrasado" in estado:
         return "tag-stop"
 
@@ -193,32 +202,35 @@ def vencimiento_texto(fecha):
 
     if dias < 0:
         return f"Vencido hace {abs(dias)} días", "tag-stop"
+
     if dias == 0:
         return "Vence hoy", "tag-stop"
+
     if dias <= 7:
         return f"Vence en {dias} días", "tag-stop"
+
     if dias <= 30:
         return f"Vence en {dias} días", "tag-proceso"
 
     return f"Vence en {dias} días", "tag-neutro"
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_excel_from_github(url):
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-
-    excel_bytes = BytesIO(response.content)
-    excel_file = pd.ExcelFile(excel_bytes, engine="openpyxl")
+def read_excel_base(file_or_buffer):
+    try:
+        excel_file = pd.ExcelFile(file_or_buffer, engine="openpyxl")
+    except Exception as e:
+        st.error(f"No se pudo leer el archivo Excel. Error: {e}")
+        st.stop()
 
     sheet_found = None
+
     for sheet in excel_file.sheet_names:
         if sheet.strip().upper() == EXCEL_SHEET.upper():
             sheet_found = sheet
             break
 
     if sheet_found is None:
-        st.error(f"No se encontró la pestaña {EXCEL_SHEET}.")
+        st.error(f"No se encontró la pestaña '{EXCEL_SHEET}' en el Excel.")
         st.write("Pestañas encontradas:", excel_file.sheet_names)
         st.stop()
 
@@ -226,6 +238,19 @@ def load_excel_from_github(url):
     df.columns = [str(c).strip() for c in df.columns]
 
     return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_excel_from_github(url):
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+    except Exception as e:
+        st.error(f"No se pudo descargar el Excel desde GitHub. Error: {e}")
+        st.stop()
+
+    excel_bytes = BytesIO(response.content)
+    return read_excel_base(excel_bytes)
 
 
 def prepare_data(df):
@@ -237,7 +262,8 @@ def prepare_data(df):
     col_encargado = find_column(df, ["ENCARGADO", "ENCARGA", "RESPONSABLE"])
     col_equipo = find_column(df, ["EQUIPO DE SOPORTE", "EQUIPO DE SOP", "EQUIPO"])
     col_estado = find_column(df, ["ESTADO"])
-    col_avance = find_column(df, ["% COMPL", "% COMPLE", "% COMPLETADO", "AVANCE"])
+    col_avance = find_column(df, ["% COMPL", "% COMPLE", "% COMPLETADO", "AVANCE", "PORCENTAJE"])
+
     col_fecha = find_column(df, [
         "FECHA_ENTREGA",
         "FECHA ENTREGA",
@@ -247,10 +273,11 @@ def prepare_data(df):
         "FECHA DE FINALIZACIÓN",
         "FECHA DE FINALIZACION",
         "VENCIMIENTO",
+        "FECHA VENCIMIENTO",
         "FECHA DE VENCIMIENTO"
     ])
 
-    obligatorias = {
+    required = {
         "TIPO": col_tipo,
         "PROYECTO": col_proyecto,
         "MINI PROYECTO": col_mini,
@@ -258,10 +285,10 @@ def prepare_data(df):
         "FECHA_ENTREGA": col_fecha
     }
 
-    faltantes = [k for k, v in obligatorias.items() if v is None]
+    missing = [name for name, col in required.items() if col is None]
 
-    if faltantes:
-        st.error("Faltan columnas obligatorias: " + ", ".join(faltantes))
+    if missing:
+        st.error("Faltan columnas obligatorias en la pestaña BASE: " + ", ".join(missing))
         st.write("Columnas encontradas:", list(df.columns))
         st.stop()
 
@@ -271,9 +298,22 @@ def prepare_data(df):
     data["Tipo"] = df[col_tipo].fillna("Sin tipo").astype(str).str.strip()
     data["Proyecto"] = df[col_proyecto].fillna("").astype(str).str.strip()
     data["Mini proyecto"] = df[col_mini].fillna("").astype(str).str.strip()
-    data["Descripción"] = df[col_descripcion].fillna("").astype(str).str.strip() if col_descripcion else ""
-    data["Encargado"] = df[col_encargado].fillna("").astype(str).str.strip() if col_encargado else ""
-    data["Equipo"] = df[col_equipo].fillna("").astype(str).str.strip() if col_equipo else ""
+
+    if col_descripcion:
+        data["Descripción"] = df[col_descripcion].fillna("").astype(str).str.strip()
+    else:
+        data["Descripción"] = ""
+
+    if col_encargado:
+        data["Encargado"] = df[col_encargado].fillna("").astype(str).str.strip()
+    else:
+        data["Encargado"] = ""
+
+    if col_equipo:
+        data["Equipo"] = df[col_equipo].fillna("").astype(str).str.strip()
+    else:
+        data["Equipo"] = ""
+
     data["Estado"] = df[col_estado].fillna("Sin estado").astype(str).str.strip()
 
     if col_avance:
@@ -291,7 +331,8 @@ def prepare_data(df):
 
     data["Días restantes"] = (data["Fecha entrega"] - hoy).dt.days
     data["Sin fecha"] = data["Fecha entrega"].isna()
-    data["Fecha texto"] = data["Fecha entrega"].dt.strftime("%d/%m/%Y").fillna("Sin fecha")
+    data["Fecha texto"] = data["Fecha entrega"].dt.strftime("%d/%m/%Y")
+    data["Fecha texto"] = data["Fecha texto"].fillna("Sin fecha")
 
     data["Nombre tarjeta"] = data["Mini proyecto"]
     data.loc[data["Nombre tarjeta"].str.strip() == "", "Nombre tarjeta"] = data["Proyecto"]
@@ -310,16 +351,27 @@ def plotly_layout(fig):
         paper_bgcolor="#0f1117",
         plot_bgcolor="#0f1117",
         font=dict(color="#f4f4f5"),
-        margin=dict(l=20, r=20, t=60, b=20)
+        margin=dict(l=20, r=20, t=60, b=20),
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#f4f4f5")
+        )
     )
+
+    fig.update_xaxes(
+        gridcolor="#30384a",
+        zerolinecolor="#30384a"
+    )
+
+    fig.update_yaxes(
+        gridcolor="#30384a",
+        zerolinecolor="#30384a"
+    )
+
     return fig
 
 
 def render_card(row):
-    fecha_texto = row["Fecha texto"]
-    venc_text, venc_class = vencimiento_texto(row["Fecha entrega"])
-    est_class = estado_class(row["Estado"])
-
     titulo = escape(str(row["Nombre tarjeta"]))
     tipo = escape(str(row["Tipo"]))
     proyecto = escape(str(row["Proyecto"]))
@@ -327,41 +379,43 @@ def render_card(row):
     encargado = escape(str(row["Encargado"]))
     equipo = escape(str(row["Equipo"]))
     estado = escape(str(row["Estado"]))
+    fecha_texto = escape(str(row["Fecha texto"]))
+
     avance = int(row["Avance"])
+
+    venc_text, venc_class = vencimiento_texto(row["Fecha entrega"])
+    estado_css = estado_class(row["Estado"])
+
+    venc_text = escape(str(venc_text))
 
     descripcion_html = ""
     if descripcion.strip():
-        descripcion_html = f'<div class="card-text"><b>Descripción:</b> {descripcion}</div>'
+        descripcion_html = f'<div class="project-text"><b>Descripción:</b> {descripcion}</div>'
 
     encargado_html = ""
     if encargado.strip():
-        encargado_html = f'<div class="card-text"><b>Encargado:</b> {encargado}</div>'
+        encargado_html = f'<div class="project-text"><b>Encargado:</b> {encargado}</div>'
 
     equipo_html = ""
     if equipo.strip():
-        equipo_html = f'<div class="card-text"><b>Equipo soporte:</b> {equipo}</div>'
+        equipo_html = f'<div class="project-text"><b>Equipo soporte:</b> {equipo}</div>'
 
-    st.markdown(
-        f"""
-        <div class="card">
-            <div class="card-title">📌 {titulo}</div>
-
-            <div class="card-text"><b>Tipo:</b> {tipo}</div>
-            <div class="card-text"><b>Proyecto:</b> {proyecto}</div>
-            {descripcion_html}
-            {encargado_html}
-            {equipo_html}
-            <div class="card-text"><b>Fecha entrega:</b> {fecha_texto}</div>
-
-            <span class="tag {est_class}">{estado}</span>
-            <span class="tag {venc_class}">{venc_text}</span>
-
-            <div class="card-text" style="margin-top:12px;"><b>Avance:</b> {avance}%</div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    html = (
+        '<div class="project-card">'
+        f'<div class="project-title">📌 {titulo}</div>'
+        f'<div class="project-text"><b>Tipo:</b> {tipo}</div>'
+        f'<div class="project-text"><b>Proyecto:</b> {proyecto}</div>'
+        f'{descripcion_html}'
+        f'{encargado_html}'
+        f'{equipo_html}'
+        f'<div class="project-text"><b>Fecha entrega:</b> {fecha_texto}</div>'
+        f'<span class="tag {estado_css}">{estado}</span>'
+        f'<span class="tag {venc_class}">{venc_text}</span>'
+        f'<div class="project-text" style="margin-top:14px;"><b>Avance:</b> {avance}%</div>'
+        '</div>'
     )
 
+    st.markdown(html, unsafe_allow_html=True)
     st.progress(avance / 100)
 
 
@@ -369,11 +423,20 @@ def render_card(row):
 # APP
 # =====================================================
 
-st.markdown('<div class="main-title">📌 Tracker IDM</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="main-title">📌 Tracker IDM</div>',
+    unsafe_allow_html=True
+)
+
 st.markdown(
     '<div class="subtitle">Dashboard interactivo conectado al Excel de GitHub, pestaña BASE.</div>',
     unsafe_allow_html=True
 )
+
+
+# =====================================================
+# SIDEBAR
+# =====================================================
 
 with st.sidebar:
     st.header("⚙️ Configuración")
@@ -383,17 +446,23 @@ with st.sidebar:
         type=["xlsx", "xls"]
     )
 
-    if st.button("🔄 Actualizar / limpiar caché"):
+    if st.button("🔄 Actualizar datos"):
         st.cache_data.clear()
         st.rerun()
 
     st.caption("Fuente GitHub:")
     st.code(EXCEL_URL)
 
+    st.caption("Pestaña leída:")
+    st.code(EXCEL_SHEET)
+
+
+# =====================================================
+# CARGA DE DATOS
+# =====================================================
 
 if uploaded_file is not None:
-    raw_df = pd.read_excel(uploaded_file, sheet_name=EXCEL_SHEET, engine="openpyxl")
-    raw_df.columns = [str(c).strip() for c in raw_df.columns]
+    raw_df = read_excel_base(uploaded_file)
     fuente = "Archivo subido manualmente"
 else:
     raw_df = load_excel_from_github(EXCEL_URL)
@@ -413,25 +482,33 @@ st.markdown('<div class="section-title">Filtros</div>', unsafe_allow_html=True)
 f1, f2, f3, f4 = st.columns(4)
 
 with f1:
+    tipos_disponibles = sorted(df["Tipo"].dropna().unique())
+
     filtro_tipo = st.multiselect(
         "Tipo",
-        sorted(df["Tipo"].dropna().unique()),
-        default=sorted(df["Tipo"].dropna().unique())
+        options=tipos_disponibles,
+        default=tipos_disponibles
     )
 
 with f2:
+    estados_disponibles = sorted(df["Estado"].dropna().unique())
+
     filtro_estado = st.multiselect(
         "Estado",
-        sorted(df["Estado"].dropna().unique()),
-        default=sorted(df["Estado"].dropna().unique())
+        options=estados_disponibles,
+        default=estados_disponibles
     )
 
 with f3:
-    encargados = sorted([x for x in df["Encargado"].dropna().unique() if str(x).strip()])
+    encargados_disponibles = sorted([
+        x for x in df["Encargado"].dropna().unique()
+        if str(x).strip() != ""
+    ])
+
     filtro_encargado = st.multiselect(
         "Encargado",
-        encargados,
-        default=encargados
+        options=encargados_disponibles,
+        default=encargados_disponibles
     )
 
 with f4:
@@ -443,18 +520,23 @@ df_f = df.copy()
 df_f = df_f[df_f["Tipo"].isin(filtro_tipo)]
 df_f = df_f[df_f["Estado"].isin(filtro_estado)]
 
-if encargados:
+if encargados_disponibles:
     df_f = df_f[df_f["Encargado"].isin(filtro_encargado)]
 
 if buscar:
-    b = buscar.lower()
+    buscar_lower = buscar.lower()
+
     df_f = df_f[
-        df_f["Proyecto"].str.lower().str.contains(b, na=False)
-        | df_f["Mini proyecto"].str.lower().str.contains(b, na=False)
-        | df_f["Descripción"].str.lower().str.contains(b, na=False)
-        | df_f["Encargado"].str.lower().str.contains(b, na=False)
+        df_f["Proyecto"].astype(str).str.lower().str.contains(buscar_lower, na=False)
+        | df_f["Mini proyecto"].astype(str).str.lower().str.contains(buscar_lower, na=False)
+        | df_f["Descripción"].astype(str).str.lower().str.contains(buscar_lower, na=False)
+        | df_f["Encargado"].astype(str).str.lower().str.contains(buscar_lower, na=False)
     ]
 
+
+# =====================================================
+# FILTRO POR FECHA
+# =====================================================
 
 fechas_validas = df_f["Fecha entrega"].dropna()
 
@@ -462,32 +544,35 @@ if not fechas_validas.empty:
     min_fecha = fechas_validas.min().date()
     max_fecha = fechas_validas.max().date()
 
-    rango = st.slider(
-        "Rango de fecha de entrega",
-        min_value=min_fecha,
-        max_value=max_fecha,
-        value=(min_fecha, max_fecha),
-        format="DD/MM/YYYY"
-    )
+    if min_fecha != max_fecha:
+        rango = st.slider(
+            "Rango de fecha de entrega",
+            min_value=min_fecha,
+            max_value=max_fecha,
+            value=(min_fecha, max_fecha),
+            format="DD/MM/YYYY"
+        )
 
-    incluir_sin_fecha = st.checkbox("Incluir proyectos sin fecha", value=True)
+        incluir_sin_fecha = st.checkbox("Incluir proyectos sin fecha", value=True)
 
-    inicio = pd.Timestamp(rango[0])
-    fin = pd.Timestamp(rango[1])
+        inicio = pd.Timestamp(rango[0])
+        fin = pd.Timestamp(rango[1])
 
-    if incluir_sin_fecha:
-        df_f = df_f[
-            df_f["Fecha entrega"].isna()
-            | (
+        if incluir_sin_fecha:
+            df_f = df_f[
+                df_f["Fecha entrega"].isna()
+                | (
+                    (df_f["Fecha entrega"] >= inicio)
+                    & (df_f["Fecha entrega"] <= fin)
+                )
+            ]
+        else:
+            df_f = df_f[
                 (df_f["Fecha entrega"] >= inicio)
                 & (df_f["Fecha entrega"] <= fin)
-            )
-        ]
+            ]
     else:
-        df_f = df_f[
-            (df_f["Fecha entrega"] >= inicio)
-            & (df_f["Fecha entrega"] <= fin)
-        ]
+        st.caption(f"Todos los proyectos con fecha tienen la misma fecha de entrega: {min_fecha.strftime('%d/%m/%Y')}")
 
 
 if df_f.empty:
@@ -516,10 +601,10 @@ with tab1:
     st.markdown('<div class="section-title">Resumen general</div>', unsafe_allow_html=True)
 
     total = len(df_f)
-    completos = df_f["Estado"].str.lower().str.contains("completo", na=False).sum()
-    proceso = df_f["Estado"].str.lower().str.contains("proceso", na=False).sum()
-    planificado = df_f["Estado"].str.lower().str.contains("planificado", na=False).sum()
-    stop = df_f["Estado"].str.lower().str.contains("stop", na=False).sum()
+    completos = df_f["Estado"].astype(str).str.lower().str.contains("completo|finalizado", na=False).sum()
+    proceso = df_f["Estado"].astype(str).str.lower().str.contains("proceso", na=False).sum()
+    planificado = df_f["Estado"].astype(str).str.lower().str.contains("planificado", na=False).sum()
+    stop = df_f["Estado"].astype(str).str.lower().str.contains("stop", na=False).sum()
     vencidos = (df_f["Días restantes"] < 0).sum()
     avance_promedio = round(df_f["Avance"].mean(), 1)
 
@@ -549,8 +634,13 @@ with tab1:
             x="Estado",
             y="Cantidad",
             text="Cantidad",
-            title="Proyectos por estado"
+            title="Proyectos por estado",
+            labels={
+                "Estado": "Estado",
+                "Cantidad": "Cantidad de proyectos"
+            }
         )
+
         fig_estado.update_traces(textposition="outside")
         fig_estado = plotly_layout(fig_estado)
 
@@ -575,6 +665,7 @@ with tab1:
             title="Proyectos por tipo",
             hole=0.45
         )
+
         fig_tipo = plotly_layout(fig_tipo)
 
         st.plotly_chart(
@@ -628,7 +719,10 @@ with tab2:
         unsafe_allow_html=True
     )
 
-    st.info("Primero aparecen los proyectos con fecha más cercana. Los proyectos sin fecha quedan al final.")
+    st.markdown(
+        '<div class="note">Primero aparecen los proyectos con fecha más cercana. Los proyectos sin fecha quedan al final.</div>',
+        unsafe_allow_html=True
+    )
 
     vista = st.radio(
         "Vista",
@@ -647,19 +741,47 @@ with tab2:
 
     else:
         tipos = list(df_cards["Tipo"].dropna().unique())
-        columnas = st.columns(min(len(tipos), 4))
 
-        for i, tipo in enumerate(tipos):
-            with columnas[i % len(columnas)]:
-                st.subheader(tipo)
+        orden_preferido = [
+            "Estudio Recurrente",
+            "Estudios Recurrentes",
+            "Iniciativa",
+            "Iniciativas",
+            "Solicitud Interna",
+            "Solicitudes Internas",
+            "Tendencias"
+        ]
 
-                subset = df_cards[df_cards["Tipo"] == tipo].sort_values(
-                    by=["Sin fecha", "Fecha entrega"],
-                    ascending=[True, True]
-                )
+        tipos_ordenados = []
 
-                for _, row in subset.iterrows():
-                    render_card(row)
+        for tipo_preferido in orden_preferido:
+            for tipo_real in tipos:
+                if str(tipo_real).strip().lower() == tipo_preferido.lower():
+                    if tipo_real not in tipos_ordenados:
+                        tipos_ordenados.append(tipo_real)
+
+        for tipo_real in tipos:
+            if tipo_real not in tipos_ordenados:
+                tipos_ordenados.append(tipo_real)
+
+        num_cols = min(len(tipos_ordenados), 4)
+
+        if num_cols == 0:
+            st.warning("No hay proyectos para mostrar.")
+        else:
+            cols = st.columns(num_cols)
+
+            for i, tipo in enumerate(tipos_ordenados):
+                with cols[i % num_cols]:
+                    st.subheader(tipo)
+
+                    subset = df_cards[df_cards["Tipo"] == tipo].sort_values(
+                        by=["Sin fecha", "Fecha entrega"],
+                        ascending=[True, True]
+                    )
+
+                    for _, row in subset.iterrows():
+                        render_card(row)
 
 
 # =====================================================
@@ -683,6 +805,13 @@ with tab3:
             "Días restantes"
         ]
     ].copy()
+
+    tabla = tabla.rename(
+        columns={
+            "Avance": "% completado",
+            "Fecha texto": "Fecha entrega"
+        }
+    )
 
     st.dataframe(
         tabla,
