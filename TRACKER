@@ -1,0 +1,650 @@
+import streamlit as st
+import pandas as pd
+from datetime import date
+from pathlib import Path
+from html import escape
+
+# =====================================================
+# CONFIGURACIÓN GENERAL
+# =====================================================
+
+st.set_page_config(
+    page_title="Tracker de Proyectos",
+    page_icon="📌",
+    layout="wide"
+)
+
+# Si quieres usar un archivo fijo en tu carpeta, pon aquí el nombre.
+# Ejemplo:
+# EXCEL_PATH = "tracker_proyectos.xlsx"
+EXCEL_PATH = None
+
+# Nombre de la pestaña del Excel
+EXCEL_SHEET = "BASE"
+
+
+# =====================================================
+# ESTILOS
+# =====================================================
+
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background-color: #1f1f1f;
+        color: #f2f2f2;
+    }
+
+    section[data-testid="stSidebar"] {
+        background-color: #181818;
+    }
+
+    .main-title {
+        font-size: 34px;
+        font-weight: 800;
+        margin-bottom: 5px;
+    }
+
+    .subtitle {
+        color: #b8b8b8;
+        font-size: 15px;
+        margin-bottom: 25px;
+    }
+
+    .kanban-column-title {
+        font-size: 20px;
+        font-weight: 800;
+        margin-bottom: 15px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid #3a3a3a;
+    }
+
+    .project-card {
+        background-color: #2b2b2b;
+        border-radius: 14px;
+        padding: 16px;
+        margin-bottom: 8px;
+        border: 1px solid #3d3d3d;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    }
+
+    .project-title {
+        font-size: 17px;
+        font-weight: 800;
+        color: #ffffff;
+        margin-bottom: 8px;
+        line-height: 1.35;
+    }
+
+    .project-meta {
+        font-size: 13px;
+        color: #c9c9c9;
+        margin-bottom: 5px;
+        line-height: 1.35;
+    }
+
+    .tag {
+        display: inline-block;
+        padding: 4px 9px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+        margin-right: 5px;
+        margin-top: 8px;
+    }
+
+    .tag-ok {
+        background-color: #123d2a;
+        color: #67e8a3;
+    }
+
+    .tag-progress {
+        background-color: #3d3312;
+        color: #ffd166;
+    }
+
+    .tag-plan {
+        background-color: #13294b;
+        color: #83b9ff;
+    }
+
+    .tag-danger {
+        background-color: #4a1515;
+        color: #ff8a8a;
+    }
+
+    .tag-warning {
+        background-color: #4a3715;
+        color: #ffd27a;
+    }
+
+    .tag-neutral {
+        background-color: #3a3a3a;
+        color: #d0d0d0;
+    }
+
+    .progress-label {
+        font-size: 12px;
+        color: #bdbdbd;
+        margin-top: 10px;
+        margin-bottom: 4px;
+    }
+
+    div[data-testid="stProgress"] > div > div > div > div {
+        background-color: #7c83ff;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# =====================================================
+# FUNCIONES AUXILIARES
+# =====================================================
+
+def normalize_col(col):
+    """
+    Normaliza nombres de columnas para tolerar espacios,
+    mayúsculas y acentos.
+    """
+    return (
+        str(col)
+        .strip()
+        .upper()
+        .replace("Á", "A")
+        .replace("É", "E")
+        .replace("Í", "I")
+        .replace("Ó", "O")
+        .replace("Ú", "U")
+        .replace("Ñ", "N")
+    )
+
+
+def find_column(df, possible_names):
+    """
+    Busca una columna aunque el Excel tenga ligeras variaciones
+    en el nombre.
+    """
+    normalized = {normalize_col(c): c for c in df.columns}
+
+    for name in possible_names:
+        key = normalize_col(name)
+        if key in normalized:
+            return normalized[key]
+
+    return None
+
+
+def clean_percentage(value):
+    """
+    Convierte valores como:
+    100%
+    100
+    1
+    0.85
+    a un número entre 0 y 100.
+    """
+    if pd.isna(value):
+        return 0
+
+    if isinstance(value, str):
+        value = value.replace("%", "").replace(",", ".").strip()
+
+    try:
+        value = float(value)
+    except Exception:
+        return 0
+
+    if value <= 1:
+        value = value * 100
+
+    return max(0, min(100, value))
+
+
+def status_tag_class(status):
+    status = str(status).lower()
+
+    if "completo" in status or "finalizado" in status:
+        return "tag-ok"
+    elif "proceso" in status:
+        return "tag-progress"
+    elif "planificado" in status:
+        return "tag-plan"
+    elif "atrasado" in status or "vencido" in status:
+        return "tag-danger"
+    else:
+        return "tag-neutral"
+
+
+def due_tag(fecha):
+    """
+    Etiqueta visual según la cercanía de la fecha de entrega.
+    """
+    if pd.isna(fecha):
+        return "Sin fecha", "tag-neutral"
+
+    today = pd.Timestamp(date.today()).normalize()
+    fecha = pd.Timestamp(fecha).normalize()
+    days = (fecha - today).days
+
+    if days < 0:
+        return f"Vencido hace {abs(days)} días", "tag-danger"
+    elif days == 0:
+        return "Vence hoy", "tag-danger"
+    elif days <= 7:
+        return f"Vence en {days} días", "tag-warning"
+    elif days <= 30:
+        return f"Vence en {days} días", "tag-progress"
+    else:
+        return f"Vence en {days} días", "tag-neutral"
+
+
+@st.cache_data(show_spinner=False)
+def load_excel(uploaded_file_or_path):
+    """
+    Lee exclusivamente la pestaña BASE del Excel.
+    Acepta tanto archivo subido desde Streamlit como ruta local.
+    """
+
+    try:
+        excel_file = pd.ExcelFile(uploaded_file_or_path)
+    except Exception as e:
+        st.error(f"No se pudo leer el archivo Excel. Error: {e}")
+        st.stop()
+
+    # Buscar la hoja BASE sin importar mayúsculas/minúsculas
+    sheet_found = None
+    for sheet in excel_file.sheet_names:
+        if sheet.strip().upper() == EXCEL_SHEET.upper():
+            sheet_found = sheet
+            break
+
+    if sheet_found is None:
+        st.error(
+            f"No se encontró la pestaña '{EXCEL_SHEET}' en el archivo Excel. "
+            f"Pestañas encontradas: {', '.join(excel_file.sheet_names)}"
+        )
+        st.stop()
+
+    df = pd.read_excel(uploaded_file_or_path, sheet_name=sheet_found)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    return df
+
+
+def prepare_data(df):
+    """
+    Convierte las columnas del Excel a columnas internas del dashboard.
+    """
+
+    col_anio = find_column(df, ["AÑO", "ANIO"])
+    col_clasificacion = find_column(df, ["CLASIFICACION", "CLASIFICACIÓN", "CLASIFICAC"])
+    col_tipo = find_column(df, ["TIPO"])
+    col_proyecto = find_column(df, ["PROYECTO"])
+    col_mini = find_column(df, ["MINI PROYECTO", "MINIPROYECTO", "MINI_PROYECTO"])
+    col_descripcion = find_column(df, ["DESCRIPCION", "DESCRIPCIÓN"])
+    col_encargado = find_column(df, ["ENCARGADO", "ENCARGA", "RESPONSABLE"])
+    col_equipo = find_column(df, ["EQUIPO DE SOPORTE", "EQUIPO DE SOP", "EQUIPO"])
+    col_estado = find_column(df, ["ESTADO"])
+    col_pct = find_column(df, ["% COMPLETADO", "% COMPLE", "% COMPL", "PORCENTAJE", "AVANCE"])
+
+    col_fecha = find_column(df, [
+        "FECHA_ENTREGA",
+        "FECHA ENTREGA",
+        "FECHA DE ENTREGA",
+        "FECHA FINALIZACION",
+        "FECHA FINALIZACIÓN",
+        "FECHA DE FINALIZACION",
+        "FECHA DE FINALIZACIÓN",
+        "VENCIMIENTO",
+        "FECHA VENCIMIENTO",
+        "FECHA DE VENCIMIENTO"
+    ])
+
+    required = {
+        "TIPO": col_tipo,
+        "PROYECTO": col_proyecto,
+        "MINI PROYECTO": col_mini,
+        "ESTADO": col_estado,
+        "FECHA_ENTREGA": col_fecha,
+    }
+
+    missing = [k for k, v in required.items() if v is None]
+
+    if missing:
+        st.error(
+            "Faltan estas columnas obligatorias en la pestaña BASE: "
+            + ", ".join(missing)
+        )
+
+        st.info("Columnas encontradas en tu Excel:")
+        st.write(list(df.columns))
+        st.stop()
+
+    data = pd.DataFrame()
+
+    data["anio"] = df[col_anio] if col_anio else ""
+    data["clasificacion"] = df[col_clasificacion] if col_clasificacion else ""
+    data["tipo"] = df[col_tipo].fillna("Sin tipo")
+    data["proyecto"] = df[col_proyecto].fillna("")
+    data["mini_proyecto"] = df[col_mini].fillna("")
+    data["descripcion"] = df[col_descripcion].fillna("") if col_descripcion else ""
+    data["encargado"] = df[col_encargado].fillna("") if col_encargado else ""
+    data["equipo"] = df[col_equipo].fillna("") if col_equipo else ""
+    data["estado"] = df[col_estado].fillna("Sin estado")
+    data["avance"] = df[col_pct].apply(clean_percentage) if col_pct else 0
+
+    # Lee fechas en formato latino: dd/mm/yyyy
+    data["fecha_entrega"] = pd.to_datetime(
+        df[col_fecha],
+        errors="coerce",
+        dayfirst=True
+    )
+
+    today = pd.Timestamp(date.today()).normalize()
+
+    data["dias_restantes"] = (data["fecha_entrega"] - today).dt.days
+    data["sin_fecha"] = data["fecha_entrega"].isna()
+
+    # Orden general:
+    # primero proyectos con fecha,
+    # luego los más próximos a vencer,
+    # finalmente los sin fecha.
+    data = data.sort_values(
+        by=["sin_fecha", "fecha_entrega", "avance"],
+        ascending=[True, True, True]
+    )
+
+    return data
+
+
+def render_project_card(row):
+    titulo = row["mini_proyecto"] or row["proyecto"]
+    proyecto = row["proyecto"]
+    estado = row["estado"]
+    avance = int(row["avance"])
+    fecha = row["fecha_entrega"]
+
+    due_text, due_class = due_tag(fecha)
+    estado_class = status_tag_class(estado)
+
+    fecha_text = "Sin fecha"
+    if not pd.isna(fecha):
+        fecha_text = pd.Timestamp(fecha).strftime("%d/%m/%Y")
+
+    titulo = escape(str(titulo))
+    proyecto = escape(str(proyecto))
+    descripcion = escape(str(row["descripcion"]))
+    encargado = escape(str(row["encargado"]))
+    equipo = escape(str(row["equipo"]))
+    estado = escape(str(estado))
+    fecha_text = escape(str(fecha_text))
+
+    descripcion_html = ""
+    if descripcion.strip():
+        descripcion_html = f"""
+        <div class="project-meta">
+            <b>Descripción:</b> {descripcion}
+        </div>
+        """
+
+    encargado_html = ""
+    if encargado.strip():
+        encargado_html = f"""
+        <div class="project-meta">
+            <b>Encargado:</b> {encargado}
+        </div>
+        """
+
+    equipo_html = ""
+    if equipo.strip():
+        equipo_html = f"""
+        <div class="project-meta">
+            <b>Equipo soporte:</b> {equipo}
+        </div>
+        """
+
+    st.markdown(
+        f"""
+        <div class="project-card">
+            <div class="project-title">○ {titulo}</div>
+
+            <div class="project-meta">
+                <b>Proyecto:</b> {proyecto}
+            </div>
+
+            {descripcion_html}
+            {encargado_html}
+            {equipo_html}
+
+            <div class="project-meta">
+                <b>Fecha entrega:</b> {fecha_text}
+            </div>
+
+            <span class="tag {estado_class}">{estado}</span>
+            <span class="tag {due_class}">{due_text}</span>
+
+            <div class="progress-label">Avance: {avance}%</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.progress(avance / 100)
+
+
+# =====================================================
+# INTERFAZ PRINCIPAL
+# =====================================================
+
+st.markdown(
+    '<div class="main-title">📌 Tracker de Proyectos</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">Dashboard alimentado desde la pestaña BASE del Excel. Los proyectos se ordenan automáticamente por fecha de entrega.</div>',
+    unsafe_allow_html=True
+)
+
+
+# =====================================================
+# SIDEBAR
+# =====================================================
+
+with st.sidebar:
+    st.header("⚙️ Configuración")
+
+    uploaded_file = st.file_uploader(
+        "Sube el Excel del tracker",
+        type=["xlsx", "xls"]
+    )
+
+    st.caption("El archivo debe tener una pestaña llamada BASE.")
+
+    st.divider()
+
+    hide_completed = st.checkbox("Ocultar completados", value=False)
+    only_overdue = st.checkbox("Mostrar solo vencidos", value=False)
+
+    search = st.text_input("Buscar proyecto")
+
+    st.divider()
+
+    st.caption("Columnas recomendadas en la pestaña BASE:")
+    st.code(
+        """AÑO
+TIPO
+PROYECTO
+MINI PROYECTO
+DESCRIPCIÓN
+ENCARGADO
+EQUIPO DE SOPORTE
+ESTADO
+% COMPL
+FECHA_ENTREGA"""
+    )
+
+
+# =====================================================
+# CARGA DEL EXCEL
+# =====================================================
+
+if uploaded_file is not None:
+    raw_df = load_excel(uploaded_file)
+elif EXCEL_PATH and Path(EXCEL_PATH).exists():
+    raw_df = load_excel(EXCEL_PATH)
+else:
+    st.info("Sube un archivo Excel para visualizar el tracker.")
+    st.stop()
+
+
+df = prepare_data(raw_df)
+
+
+# =====================================================
+# FILTROS
+# =====================================================
+
+if hide_completed:
+    df = df[
+        ~df["estado"]
+        .astype(str)
+        .str.lower()
+        .str.contains("completo|finalizado", na=False)
+    ]
+
+if only_overdue:
+    df = df[df["dias_restantes"] < 0]
+
+if search:
+    search_lower = search.lower()
+
+    df = df[
+        df["proyecto"].astype(str).str.lower().str.contains(search_lower, na=False)
+        | df["mini_proyecto"].astype(str).str.lower().str.contains(search_lower, na=False)
+        | df["descripcion"].astype(str).str.lower().str.contains(search_lower, na=False)
+        | df["encargado"].astype(str).str.lower().str.contains(search_lower, na=False)
+    ]
+
+
+# =====================================================
+# MÉTRICAS SUPERIORES
+# =====================================================
+
+total = len(df)
+
+completos = (
+    df["estado"]
+    .astype(str)
+    .str.lower()
+    .str.contains("completo|finalizado", na=False)
+    .sum()
+)
+
+en_proceso = (
+    df["estado"]
+    .astype(str)
+    .str.lower()
+    .str.contains("proceso", na=False)
+    .sum()
+)
+
+planificados = (
+    df["estado"]
+    .astype(str)
+    .str.lower()
+    .str.contains("planificado", na=False)
+    .sum()
+)
+
+vencidos = (df["dias_restantes"] < 0).sum()
+
+m1, m2, m3, m4, m5 = st.columns(5)
+
+with m1:
+    st.metric("Total proyectos", int(total))
+
+with m2:
+    st.metric("Completos", int(completos))
+
+with m3:
+    st.metric("En proceso", int(en_proceso))
+
+with m4:
+    st.metric("Planificados", int(planificados))
+
+with m5:
+    st.metric("Vencidos", int(vencidos))
+
+st.divider()
+
+
+# =====================================================
+# KANBAN POR TIPO
+# =====================================================
+
+tipos = list(df["tipo"].dropna().unique())
+
+orden_preferido = [
+    "Estudio Recurrente",
+    "Estudios Recurrentes",
+    "Iniciativa",
+    "Iniciativas",
+    "Solicitud Interna",
+    "Solicitudes Internas",
+    "Tendencias"
+]
+
+tipos_ordenados = []
+
+for tipo_preferido in orden_preferido:
+    for tipo_real in tipos:
+        if str(tipo_real).strip().lower() == tipo_preferido.lower():
+            if tipo_real not in tipos_ordenados:
+                tipos_ordenados.append(tipo_real)
+
+for tipo_real in tipos:
+    if tipo_real not in tipos_ordenados:
+        tipos_ordenados.append(tipo_real)
+
+
+if not tipos_ordenados:
+    st.warning("No hay proyectos para mostrar con los filtros actuales.")
+    st.stop()
+
+
+# Para no romper la pantalla si aparecen muchas categorías
+max_columns = min(len(tipos_ordenados), 5)
+cols = st.columns(max_columns)
+
+for idx, tipo in enumerate(tipos_ordenados):
+    col = cols[idx % max_columns]
+
+    with col:
+        subset = df[df["tipo"] == tipo].copy()
+
+        # Orden dentro de cada columna:
+        # 1. Proyectos con fecha
+        # 2. Fecha más cercana arriba
+        # 3. Sin fecha al final
+        subset = subset.sort_values(
+            by=["sin_fecha", "fecha_entrega", "avance"],
+            ascending=[True, True, True]
+        )
+
+        st.markdown(
+            f"""
+            <div class="kanban-column-title">
+                {escape(str(tipo))}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        if subset.empty:
+            st.caption("Sin proyectos")
+        else:
+            for _, row in subset.iterrows():
+                render_project_card(row)
