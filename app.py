@@ -5,6 +5,7 @@ import requests
 from io import BytesIO
 from datetime import date
 from html import escape
+import re
 
 # =====================================================
 # CONFIGURACIÓN GENERAL
@@ -62,12 +63,12 @@ st.markdown(
         border: 1px solid #30384a;
         border-radius: 18px;
         padding: 22px;
-        margin-bottom: 18px;
+        margin-bottom: 22px;
         box-shadow: 0 6px 18px rgba(0,0,0,0.25);
     }
 
     .project-title {
-        font-size: 22px;
+        font-size: 24px;
         font-weight: 800;
         color: white;
         margin-bottom: 14px;
@@ -79,6 +80,36 @@ st.markdown(
         color: #d4d4d8;
         margin-bottom: 6px;
         line-height: 1.4;
+    }
+
+    .activity-box {
+        background: #151923;
+        border: 1px solid #30384a;
+        border-radius: 14px;
+        padding: 14px;
+        margin-top: 12px;
+    }
+
+    .activity-title {
+        font-size: 17px;
+        font-weight: 800;
+        color: #ffffff;
+        margin-bottom: 8px;
+        line-height: 1.35;
+    }
+
+    .activity-text {
+        font-size: 14px;
+        color: #d4d4d8;
+        margin-bottom: 5px;
+        line-height: 1.35;
+    }
+
+    .activity-counter {
+        font-size: 14px;
+        color: #a1a1aa;
+        margin-top: 8px;
+        margin-bottom: 10px;
     }
 
     .tag {
@@ -223,6 +254,90 @@ def vencimiento_texto(fecha, estado):
     return f"Vence en {dias} días", "tag-neutro"
 
 
+def parse_fecha(value, anio_hint=None):
+    """
+    Soporta fechas tipo:
+    - 01/03/2027
+    - 1/3/2027
+    - 1-ene
+    - 18-abr
+    - Fechas reales de Excel
+    """
+
+    if pd.isna(value):
+        return pd.NaT
+
+    if isinstance(value, pd.Timestamp):
+        return value
+
+    # Excel puede traer datetime/date directamente
+    try:
+        if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+            return pd.Timestamp(value)
+    except Exception:
+        pass
+
+    text = str(value).strip().lower()
+
+    if text in ["", "nan", "nat", "none"]:
+        return pd.NaT
+
+    meses = {
+        "ene": "01",
+        "enero": "01",
+        "feb": "02",
+        "febrero": "02",
+        "mar": "03",
+        "marzo": "03",
+        "abr": "04",
+        "abril": "04",
+        "may": "05",
+        "mayo": "05",
+        "jun": "06",
+        "junio": "06",
+        "jul": "07",
+        "julio": "07",
+        "ago": "08",
+        "agosto": "08",
+        "sep": "09",
+        "sept": "09",
+        "septiembre": "09",
+        "set": "09",
+        "oct": "10",
+        "octubre": "10",
+        "nov": "11",
+        "noviembre": "11",
+        "dic": "12",
+        "diciembre": "12",
+    }
+
+    # Caso tipo 1-ene, 18-abr
+    match = re.match(r"^(\d{1,2})[-/ ]([a-záéíóúñ]+)$", text)
+    if match:
+        dia = match.group(1).zfill(2)
+        mes_texto = (
+            match.group(2)
+            .replace("á", "a")
+            .replace("é", "e")
+            .replace("í", "i")
+            .replace("ó", "o")
+            .replace("ú", "u")
+        )
+
+        mes = meses.get(mes_texto)
+
+        if mes:
+            try:
+                anio = int(anio_hint)
+            except Exception:
+                anio = date.today().year
+
+            return pd.to_datetime(f"{dia}/{mes}/{anio}", dayfirst=True, errors="coerce")
+
+    # Intento general
+    return pd.to_datetime(value, errors="coerce", dayfirst=True)
+
+
 def read_excel_base(file_or_buffer):
     try:
         excel_file = pd.ExcelFile(file_or_buffer, engine="openpyxl")
@@ -282,7 +397,9 @@ def prepare_data(df):
         "FECHA DE FINALIZACION",
         "VENCIMIENTO",
         "FECHA VENCIMIENTO",
-        "FECHA DE VENCIMIENTO"
+        "FECHA DE VENCIMIENTO",
+        "FECHA_E",
+        "FECHA E"
     ])
 
     required = {
@@ -329,11 +446,18 @@ def prepare_data(df):
     else:
         data["Avance"] = 0
 
-    data["Fecha entrega"] = pd.to_datetime(
-        df[col_fecha],
-        errors="coerce",
-        dayfirst=True
-    )
+    if col_anio:
+        data["Fecha entrega"] = [
+            parse_fecha(fecha, anio)
+            for fecha, anio in zip(df[col_fecha], df[col_anio])
+        ]
+    else:
+        data["Fecha entrega"] = [
+            parse_fecha(fecha)
+            for fecha in df[col_fecha]
+        ]
+
+    data["Fecha entrega"] = pd.to_datetime(data["Fecha entrega"], errors="coerce")
 
     hoy = pd.Timestamp(date.today()).normalize()
 
@@ -342,8 +466,9 @@ def prepare_data(df):
     data["Fecha texto"] = data["Fecha entrega"].dt.strftime("%d/%m/%Y")
     data["Fecha texto"] = data["Fecha texto"].fillna("Sin fecha")
 
-    data["Nombre tarjeta"] = data["Mini proyecto"]
-    data.loc[data["Nombre tarjeta"].str.strip() == "", "Nombre tarjeta"] = data["Proyecto"]
+    data["Nombre actividad"] = data["Mini proyecto"]
+    data.loc[data["Nombre actividad"].str.strip() == "", "Nombre actividad"] = data["Descripción"]
+    data.loc[data["Nombre actividad"].str.strip() == "", "Nombre actividad"] = data["Proyecto"]
 
     data["Es completo"] = data["Estado"].apply(es_completo)
     data["Es pendiente"] = ~data["Es completo"]
@@ -382,52 +507,163 @@ def plotly_layout(fig):
     return fig
 
 
-def render_card(row):
-    titulo = escape(str(row["Nombre tarjeta"]))
-    tipo = escape(str(row["Tipo"]))
-    proyecto = escape(str(row["Proyecto"]))
-    descripcion = escape(str(row["Descripción"]))
-    encargado = escape(str(row["Encargado"]))
-    equipo = escape(str(row["Equipo"]))
-    estado = escape(str(row["Estado"]))
-    fecha_texto = escape(str(row["Fecha texto"]))
+def ordenar_tipos(tipos):
+    orden_preferido = [
+        "Estudio Recurrente",
+        "Estudios Recurrentes",
+        "Iniciativa",
+        "Iniciativas",
+        "Solicitud Interna",
+        "Solicitudes Internas",
+        "Tendencias"
+    ]
 
-    avance = int(row["Avance"])
+    tipos_ordenados = []
 
-    venc_text, venc_class = vencimiento_texto(row["Fecha entrega"], row["Estado"])
-    estado_css = estado_class(row["Estado"])
+    for tipo_preferido in orden_preferido:
+        for tipo_real in tipos:
+            if str(tipo_real).strip().lower() == tipo_preferido.lower():
+                if tipo_real not in tipos_ordenados:
+                    tipos_ordenados.append(tipo_real)
 
-    venc_text = escape(str(venc_text))
+    for tipo_real in tipos:
+        if tipo_real not in tipos_ordenados:
+            tipos_ordenados.append(tipo_real)
 
-    descripcion_html = ""
-    if descripcion.strip():
-        descripcion_html = f'<div class="project-text"><b>Descripción:</b> {descripcion}</div>'
+    return tipos_ordenados
 
-    encargado_html = ""
-    if encargado.strip():
-        encargado_html = f'<div class="project-text"><b>Encargado:</b> {encargado}</div>'
 
-    equipo_html = ""
-    if equipo.strip():
-        equipo_html = f'<div class="project-text"><b>Equipo soporte:</b> {equipo}</div>'
+def render_project_group_card(project_name, group, modo="pendientes"):
+    group = group.copy()
+
+    if modo == "completados":
+        group = group.sort_values(
+            by=["Sin fecha", "Fecha entrega"],
+            ascending=[True, False]
+        )
+    else:
+        group = group.sort_values(
+            by=["Sin fecha", "Fecha entrega"],
+            ascending=[True, True]
+        )
+
+    tipo = escape(str(group["Tipo"].iloc[0]))
+    proyecto = escape(str(project_name))
+
+    fechas_validas = group["Fecha entrega"].dropna()
+
+    if not fechas_validas.empty:
+        if modo == "completados":
+            fecha_referencia = fechas_validas.max()
+            fecha_label = "Última entrega registrada"
+        else:
+            fecha_referencia = fechas_validas.min()
+            fecha_label = "Próxima entrega"
+
+        fecha_referencia_texto = pd.Timestamp(fecha_referencia).strftime("%d/%m/%Y")
+
+        dias_restantes = (
+            pd.Timestamp(fecha_referencia).normalize()
+            - pd.Timestamp(date.today()).normalize()
+        ).days
+
+        if modo == "completados":
+            estado_global_text = "Completado"
+            estado_global_class = "tag-completo"
+        else:
+            if dias_restantes < 0:
+                estado_global_text = f"Vencido hace {abs(dias_restantes)} días"
+                estado_global_class = "tag-stop"
+            elif dias_restantes == 0:
+                estado_global_text = "Vence hoy"
+                estado_global_class = "tag-stop"
+            elif dias_restantes <= 7:
+                estado_global_text = f"Vence en {dias_restantes} días"
+                estado_global_class = "tag-stop"
+            elif dias_restantes <= 30:
+                estado_global_text = f"Vence en {dias_restantes} días"
+                estado_global_class = "tag-proceso"
+            else:
+                estado_global_text = f"Vence en {dias_restantes} días"
+                estado_global_class = "tag-neutro"
+    else:
+        fecha_referencia_texto = "Sin fecha"
+        fecha_label = "Fecha"
+        estado_global_text = "Sin fecha"
+        estado_global_class = "tag-neutro"
+
+    encargados = sorted([
+        str(x).strip()
+        for x in group["Encargado"].dropna().unique()
+        if str(x).strip() != ""
+    ])
+
+    encargados_texto = ", ".join(encargados) if encargados else "Sin encargado"
+
+    total_actividades = len(group)
+    avance_promedio = round(group["Avance"].mean(), 1) if total_actividades > 0 else 0
+
+    if modo == "completados":
+        contador_label = "Actividades completadas"
+        encargados_label = "Encargados"
+    else:
+        contador_label = "Actividades pendientes"
+        encargados_label = "Encargados pendientes"
+
+    actividades_html = ""
+
+    for _, row in group.iterrows():
+        actividad = escape(str(row["Nombre actividad"]))
+        descripcion = escape(str(row["Descripción"]))
+        encargado = escape(str(row["Encargado"]))
+        equipo = escape(str(row["Equipo"]))
+        estado = escape(str(row["Estado"]))
+        avance = int(row["Avance"])
+        fecha_texto = escape(str(row["Fecha texto"]))
+
+        venc_act_text, venc_act_class = vencimiento_texto(row["Fecha entrega"], row["Estado"])
+        estado_css = estado_class(row["Estado"])
+
+        descripcion_html = ""
+        if descripcion.strip():
+            descripcion_html = f'<div class="activity-text"><b>Descripción:</b> {descripcion}</div>'
+
+        encargado_html = ""
+        if encargado.strip():
+            encargado_html = f'<div class="activity-text"><b>Encargado:</b> {encargado}</div>'
+
+        equipo_html = ""
+        if equipo.strip():
+            equipo_html = f'<div class="activity-text"><b>Equipo soporte:</b> {equipo}</div>'
+
+        actividades_html += (
+            '<div class="activity-box">'
+            f'<div class="activity-title">🧩 {actividad}</div>'
+            f'{descripcion_html}'
+            f'{encargado_html}'
+            f'{equipo_html}'
+            f'<div class="activity-text"><b>Fecha entrega:</b> {fecha_texto}</div>'
+            f'<div class="activity-text"><b>Avance:</b> {avance}%</div>'
+            f'<span class="tag {estado_css}">{estado}</span>'
+            f'<span class="tag {venc_act_class}">{escape(str(venc_act_text))}</span>'
+            '</div>'
+        )
 
     html = (
         '<div class="project-card">'
-        f'<div class="project-title">📌 {titulo}</div>'
+        f'<div class="project-title">📌 {proyecto}</div>'
         f'<div class="project-text"><b>Tipo:</b> {tipo}</div>'
-        f'<div class="project-text"><b>Proyecto:</b> {proyecto}</div>'
-        f'{descripcion_html}'
-        f'{encargado_html}'
-        f'{equipo_html}'
-        f'<div class="project-text"><b>Fecha entrega:</b> {fecha_texto}</div>'
-        f'<span class="tag {estado_css}">{estado}</span>'
-        f'<span class="tag {venc_class}">{venc_text}</span>'
-        f'<div class="project-text" style="margin-top:14px;"><b>Avance:</b> {avance}%</div>'
+        f'<div class="project-text"><b>{fecha_label}:</b> {fecha_referencia_texto}</div>'
+        f'<div class="project-text"><b>{encargados_label}:</b> {escape(encargados_texto)}</div>'
+        f'<div class="project-text"><b>Avance promedio:</b> {avance_promedio}%</div>'
+        f'<div class="activity-counter"><b>{contador_label}:</b> {total_actividades}</div>'
+        f'<span class="tag {estado_global_class}">{escape(str(estado_global_text))}</span>'
+        f'{actividades_html}'
         '</div>'
     )
 
     st.markdown(html, unsafe_allow_html=True)
-    st.progress(avance / 100)
+    st.progress(min(max(avance_promedio, 0), 100) / 100)
 
 
 # =====================================================
@@ -564,7 +800,7 @@ if not fechas_validas.empty:
             format="DD/MM/YYYY"
         )
 
-        incluir_sin_fecha = st.checkbox("Incluir proyectos sin fecha", value=True)
+        incluir_sin_fecha = st.checkbox("Incluir actividades sin fecha", value=True)
 
         inicio = pd.Timestamp(rango[0])
         fin = pd.Timestamp(rango[1])
@@ -583,11 +819,11 @@ if not fechas_validas.empty:
                 & (df_f["Fecha entrega"] <= fin)
             ]
     else:
-        st.caption(f"Todos los proyectos con fecha tienen la misma fecha de entrega: {min_fecha.strftime('%d/%m/%Y')}")
+        st.caption(f"Todas las actividades con fecha tienen la misma fecha de entrega: {min_fecha.strftime('%d/%m/%Y')}")
 
 
 if df_f.empty:
-    st.warning("No hay proyectos con los filtros seleccionados.")
+    st.warning("No hay actividades con los filtros seleccionados.")
     st.stop()
 
 
@@ -598,8 +834,8 @@ if df_f.empty:
 tab1, tab2, tab3, tab4 = st.tabs(
     [
         "📊 Dashboard interactivo",
-        "🗂️ Pendientes por fecha de entrega",
-        "✅ Proyectos completados",
+        "🗂️ Pendientes por proyecto",
+        "✅ Completados",
         "📋 Tabla"
     ]
 )
@@ -613,16 +849,16 @@ with tab1:
     st.markdown('<div class="section-title">Resumen general</div>', unsafe_allow_html=True)
 
     df_pendientes = df_f[df_f["Es pendiente"]].copy()
+    df_completados = df_f[df_f["Es completo"]].copy()
 
-    total = len(df_f)
-    pendientes = len(df_pendientes)
+    total_actividades = len(df_f)
+    total_proyectos = df_f["Proyecto"].nunique()
+    actividades_pendientes = len(df_pendientes)
+    actividades_completadas = len(df_completados)
+    proyectos_pendientes = df_pendientes["Proyecto"].nunique()
+    proyectos_con_completados = df_completados["Proyecto"].nunique()
 
-    completos = df_f["Estado"].astype(str).str.lower().str.contains("completo|finalizado", na=False).sum()
-    proceso = df_f["Estado"].astype(str).str.lower().str.contains("proceso", na=False).sum()
-    planificado = df_f["Estado"].astype(str).str.lower().str.contains("planificado", na=False).sum()
-    stop = df_f["Estado"].astype(str).str.lower().str.contains("stop", na=False).sum()
-
-    vencidos = (
+    vencidos_pendientes = (
         (df_pendientes["Fecha entrega"].notna())
         & (df_pendientes["Días restantes"] < 0)
     ).sum()
@@ -631,13 +867,13 @@ with tab1:
 
     k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
 
-    k1.metric("Total", int(total))
-    k2.metric("Pendientes", int(pendientes))
-    k3.metric("Completos", int(completos))
-    k4.metric("En proceso", int(proceso))
-    k5.metric("Planificados", int(planificado))
-    k6.metric("Stop", int(stop))
-    k7.metric("Vencidos pendientes", int(vencidos))
+    k1.metric("Proyectos", int(total_proyectos))
+    k2.metric("Actividades", int(total_actividades))
+    k3.metric("Proyectos pendientes", int(proyectos_pendientes))
+    k4.metric("Actividades pendientes", int(actividades_pendientes))
+    k5.metric("Actividades completadas", int(actividades_completadas))
+    k6.metric("Proyectos con completados", int(proyectos_con_completados))
+    k7.metric("Vencidos pendientes", int(vencidos_pendientes))
 
     st.metric("Avance promedio", f"{avance_promedio}%")
 
@@ -656,7 +892,7 @@ with tab1:
             x="Estado",
             y="Cantidad",
             text="Cantidad",
-            title="Proyectos por estado"
+            title="Actividades por estado"
         )
 
         fig_estado.update_traces(textposition="outside")
@@ -680,7 +916,7 @@ with tab1:
             tipo_df,
             names="Tipo",
             values="Cantidad",
-            title="Proyectos por tipo",
+            title="Actividades por tipo",
             hole=0.45
         )
 
@@ -701,19 +937,20 @@ with tab1:
         fig_time = px.scatter(
             df_time,
             x="Fecha entrega",
-            y="Nombre tarjeta",
+            y="Nombre actividad",
             color="Estado",
             size="Avance",
             hover_data={
                 "Tipo": True,
                 "Proyecto": True,
+                "Descripción": True,
                 "Encargado": True,
                 "Fecha texto": True,
                 "Días restantes": True,
                 "Fecha entrega": False,
-                "Nombre tarjeta": False
+                "Nombre actividad": False
             },
-            title="Proyectos pendientes ordenados por fecha de entrega"
+            title="Actividades pendientes ordenadas por fecha de entrega"
         )
 
         fig_time = plotly_layout(fig_time)
@@ -724,21 +961,21 @@ with tab1:
             config={"displayModeBar": True}
         )
     else:
-        st.info("No hay proyectos pendientes con fecha de entrega para mostrar.")
+        st.info("No hay actividades pendientes con fecha de entrega para mostrar.")
 
 
 # =====================================================
-# TAB 2 - PENDIENTES
+# TAB 2 - PENDIENTES AGRUPADOS POR PROYECTO
 # =====================================================
 
 with tab2:
     st.markdown(
-        '<div class="section-title">Pendientes ordenados por fecha de entrega</div>',
+        '<div class="section-title">Proyectos pendientes por fecha de entrega</div>',
         unsafe_allow_html=True
     )
 
     st.markdown(
-        '<div class="note">Aquí solo aparecen proyectos pendientes. Los completos o finalizados no se muestran en esta vista.</div>',
+        '<div class="note">Cada tarjeta representa un proyecto. Dentro de cada tarjeta aparecen las actividades pendientes, sus descripciones, responsables y fechas de entrega.</div>',
         unsafe_allow_html=True
     )
 
@@ -751,96 +988,86 @@ with tab2:
 
     df_cards = df_f[df_f["Es pendiente"]].copy()
 
-    df_cards = df_cards.sort_values(
-        by=["Sin fecha", "Fecha entrega"],
-        ascending=[True, True]
-    )
-
     if df_cards.empty:
-        st.success("No hay proyectos pendientes con los filtros seleccionados.")
-
-    elif vista == "Lista general":
-        for _, row in df_cards.iterrows():
-            render_card(row)
+        st.success("No hay actividades pendientes con los filtros seleccionados.")
 
     else:
-        tipos = list(df_cards["Tipo"].dropna().unique())
+        proyecto_prioridad = (
+            df_cards
+            .groupby("Proyecto", as_index=False)
+            .agg(
+                tipo=("Tipo", "first"),
+                fecha_proxima=("Fecha entrega", "min"),
+                actividades_pendientes=("Proyecto", "size")
+            )
+        )
 
-        orden_preferido = [
-            "Estudio Recurrente",
-            "Estudios Recurrentes",
-            "Iniciativa",
-            "Iniciativas",
-            "Solicitud Interna",
-            "Solicitudes Internas",
-            "Tendencias"
-        ]
+        proyecto_prioridad["sin_fecha"] = proyecto_prioridad["fecha_proxima"].isna()
 
-        tipos_ordenados = []
+        proyecto_prioridad = proyecto_prioridad.sort_values(
+            by=["sin_fecha", "fecha_proxima"],
+            ascending=[True, True]
+        )
 
-        for tipo_preferido in orden_preferido:
-            for tipo_real in tipos:
-                if str(tipo_real).strip().lower() == tipo_preferido.lower():
-                    if tipo_real not in tipos_ordenados:
-                        tipos_ordenados.append(tipo_real)
+        if vista == "Lista general":
+            for proyecto in proyecto_prioridad["Proyecto"]:
+                group = df_cards[df_cards["Proyecto"] == proyecto]
+                render_project_group_card(proyecto, group, modo="pendientes")
 
-        for tipo_real in tipos:
-            if tipo_real not in tipos_ordenados:
-                tipos_ordenados.append(tipo_real)
-
-        num_cols = min(len(tipos_ordenados), 4)
-
-        if num_cols == 0:
-            st.warning("No hay proyectos pendientes para mostrar.")
         else:
-            cols = st.columns(num_cols)
+            tipos = list(proyecto_prioridad["tipo"].dropna().unique())
+            tipos_ordenados = ordenar_tipos(tipos)
 
-            for i, tipo in enumerate(tipos_ordenados):
-                with cols[i % num_cols]:
-                    st.subheader(tipo)
+            num_cols = min(len(tipos_ordenados), 4)
 
-                    subset = df_cards[df_cards["Tipo"] == tipo].sort_values(
-                        by=["Sin fecha", "Fecha entrega"],
-                        ascending=[True, True]
-                    )
+            if num_cols == 0:
+                st.warning("No hay proyectos pendientes para mostrar.")
+            else:
+                cols = st.columns(num_cols)
 
-                    for _, row in subset.iterrows():
-                        render_card(row)
+                for i, tipo in enumerate(tipos_ordenados):
+                    with cols[i % num_cols]:
+                        st.subheader(tipo)
+
+                        proyectos_tipo = proyecto_prioridad[
+                            proyecto_prioridad["tipo"] == tipo
+                        ]
+
+                        for proyecto in proyectos_tipo["Proyecto"]:
+                            group = df_cards[df_cards["Proyecto"] == proyecto]
+                            render_project_group_card(proyecto, group, modo="pendientes")
 
 
 # =====================================================
-# TAB 3 - PROYECTOS COMPLETADOS
+# TAB 3 - COMPLETADOS AGRUPADOS POR PROYECTO
 # =====================================================
 
 with tab3:
     st.markdown(
-        '<div class="section-title">Proyectos completados</div>',
+        '<div class="section-title">Proyectos y actividades completadas</div>',
         unsafe_allow_html=True
     )
 
     st.markdown(
-        '<div class="note">Aquí aparecen únicamente los proyectos con estado Completo o Finalizado.</div>',
+        '<div class="note">Aquí aparecen las actividades que ya fueron completadas, agrupadas por proyecto.</div>',
         unsafe_allow_html=True
     )
 
     df_completados = df_f[df_f["Es completo"]].copy()
 
-    df_completados = df_completados.sort_values(
-        by=["Sin fecha", "Fecha entrega"],
-        ascending=[True, False]
-    )
-
     if df_completados.empty:
-        st.info("No hay proyectos completados con los filtros seleccionados.")
+        st.info("No hay actividades completadas con los filtros seleccionados.")
 
     else:
-        total_completados = len(df_completados)
+        total_completadas = len(df_completados)
+        proyectos_completados = df_completados["Proyecto"].nunique()
         avance_promedio_completados = round(df_completados["Avance"].mean(), 1)
 
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
 
-        c1.metric("Total completados", int(total_completados))
-        c2.metric("Avance promedio", f"{avance_promedio_completados}%")
+        c1.metric("Proyectos con actividades completadas", int(proyectos_completados))
+        c2.metric("Actividades completadas", int(total_completadas))
+        c3.metric("Avance promedio", f"{avance_promedio_completados}%")
 
         vista_completados = st.radio(
             "Vista de completados",
@@ -849,39 +1076,36 @@ with tab3:
             key="vista_completados"
         )
 
+        proyecto_completado_prioridad = (
+            df_completados
+            .groupby("Proyecto", as_index=False)
+            .agg(
+                tipo=("Tipo", "first"),
+                ultima_fecha=("Fecha entrega", "max"),
+                actividades_completadas=("Proyecto", "size")
+            )
+        )
+
+        proyecto_completado_prioridad["sin_fecha"] = proyecto_completado_prioridad["ultima_fecha"].isna()
+
+        proyecto_completado_prioridad = proyecto_completado_prioridad.sort_values(
+            by=["sin_fecha", "ultima_fecha"],
+            ascending=[True, False]
+        )
+
         if vista_completados == "Lista general":
-            for _, row in df_completados.iterrows():
-                render_card(row)
+            for proyecto in proyecto_completado_prioridad["Proyecto"]:
+                group = df_completados[df_completados["Proyecto"] == proyecto]
+                render_project_group_card(proyecto, group, modo="completados")
 
         elif vista_completados == "Agrupado por tipo":
-            tipos = list(df_completados["Tipo"].dropna().unique())
-
-            orden_preferido = [
-                "Estudio Recurrente",
-                "Estudios Recurrentes",
-                "Iniciativa",
-                "Iniciativas",
-                "Solicitud Interna",
-                "Solicitudes Internas",
-                "Tendencias"
-            ]
-
-            tipos_ordenados = []
-
-            for tipo_preferido in orden_preferido:
-                for tipo_real in tipos:
-                    if str(tipo_real).strip().lower() == tipo_preferido.lower():
-                        if tipo_real not in tipos_ordenados:
-                            tipos_ordenados.append(tipo_real)
-
-            for tipo_real in tipos:
-                if tipo_real not in tipos_ordenados:
-                    tipos_ordenados.append(tipo_real)
+            tipos = list(proyecto_completado_prioridad["tipo"].dropna().unique())
+            tipos_ordenados = ordenar_tipos(tipos)
 
             num_cols = min(len(tipos_ordenados), 4)
 
             if num_cols == 0:
-                st.warning("No hay proyectos completados para mostrar.")
+                st.warning("No hay actividades completadas para mostrar.")
             else:
                 cols = st.columns(num_cols)
 
@@ -889,13 +1113,13 @@ with tab3:
                     with cols[i % num_cols]:
                         st.subheader(tipo)
 
-                        subset = df_completados[df_completados["Tipo"] == tipo].sort_values(
-                            by=["Sin fecha", "Fecha entrega"],
-                            ascending=[True, False]
-                        )
+                        proyectos_tipo = proyecto_completado_prioridad[
+                            proyecto_completado_prioridad["tipo"] == tipo
+                        ]
 
-                        for _, row in subset.iterrows():
-                            render_card(row)
+                        for proyecto in proyectos_tipo["Proyecto"]:
+                            group = df_completados[df_completados["Proyecto"] == proyecto]
+                            render_project_group_card(proyecto, group, modo="completados")
 
         else:
             tabla_completados = df_completados[
